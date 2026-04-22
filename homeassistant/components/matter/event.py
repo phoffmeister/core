@@ -88,6 +88,13 @@ class MatterEventEntity(MatterEntity, EventEntity):
         if feature_map & SwitchFeature.kMomentarySwitchMultiPress:
             event_types.append("multi_press_ongoing")
             event_types.append("multi_press_complete")
+            # Also include legacy multi_press_n events for backward compatibility
+            max_presses_supported = self.get_matter_attribute_value(
+                clusters.Switch.Attributes.MultiPressMax
+            )
+            max_presses_supported = min(max_presses_supported or 2, 8)
+            for i in range(max_presses_supported):
+                event_types.append(f"multi_press_{i + 1}")
 
         # long press is optional, but requires release support
         if feature_map & SwitchFeature.kMomentarySwitchLongPress:
@@ -122,11 +129,12 @@ class MatterEventEntity(MatterEntity, EventEntity):
         if data.endpoint_id != self._endpoint.endpoint_id:
             return
         event_type = EVENT_TYPES_MAP[data.event_id]
+        press_count: int | None = None
 
         if event_type == "multi_press_complete" and data.data:
-            presses = data.data.get("totalNumberOfPressesCounted", 1)
-            if presses in MULTI_PRESS_COUNT_TO_NAME:
-                data.data["event_type_extra"] = MULTI_PRESS_COUNT_TO_NAME[presses]
+            press_count = data.data.get("totalNumberOfPressesCounted", 1)
+            if press_count in MULTI_PRESS_COUNT_TO_NAME:
+                data.data["event_type_extra"] = MULTI_PRESS_COUNT_TO_NAME[press_count]
 
         if event_type not in self.event_types:
             # this should not happen, but guard for bad things
@@ -136,6 +144,13 @@ class MatterEventEntity(MatterEntity, EventEntity):
         # pass the rest of the data as-is (such as the advanced Position data)
         self._trigger_event(event_type, data.data)
         self.async_write_ha_state()
+
+        # Also fire legacy multi_press_n event for backward compatibility
+        if press_count is not None:
+            legacy_event_type = f"multi_press_{press_count}"
+            if legacy_event_type in self.event_types:
+                self._trigger_event(legacy_event_type, data.data)
+                self.async_write_ha_state()
 
 
 # Discovery schema(s) to map Matter Attributes to HA entities

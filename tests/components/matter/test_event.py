@@ -10,9 +10,11 @@ from syrupy.assertion import SnapshotAssertion
 
 from homeassistant.components.event import ATTR_EVENT_TYPE, ATTR_EVENT_TYPES
 from homeassistant.components.matter.event import MULTI_PRESS_COUNT_TO_NAME
-from homeassistant.const import Platform
+from homeassistant.const import EVENT_STATE_CHANGED, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+
+from tests.common import async_capture_events
 
 from .common import snapshot_matter_entities, trigger_subscription_callback
 
@@ -34,10 +36,10 @@ async def test_generic_switch_node(
     matter_node: MatterNode,
 ) -> None:
     """Test event entity for a GenericSwitch node."""
-    state = hass.states.get("event.mock_generic_switch_button")
+    state = hass.states.get("event.mock_generic_switch")
     assert state
     assert state.state == "unknown"
-    assert state.name == "Mock Generic Switch Button"
+    assert state.name == "Mock Generic Switch"
     # check event_types from featuremap 14 (0b1110)
     assert state.attributes[ATTR_EVENT_TYPES] == [
         "initial_press",
@@ -62,7 +64,7 @@ async def test_generic_switch_node(
             data=None,
         ),
     )
-    state = hass.states.get("event.mock_generic_switch_button")
+    state = hass.states.get("event.mock_generic_switch")
     assert state.attributes[ATTR_EVENT_TYPE] == "initial_press"
 
 
@@ -73,36 +75,41 @@ async def test_generic_switch_multi_node(
     matter_node: MatterNode,
 ) -> None:
     """Test event entity for a GenericSwitch node with multiple buttons."""
-    state_button_1 = hass.states.get("event.mock_generic_switch_button_1")
+    state_button_1 = hass.states.get("event.mock_generic_switch")
     assert state_button_1
     assert state_button_1.state == "unknown"
-    # name should be 'DeviceName Button (1)' due to the label set to just '1'
-    assert state_button_1.name == "Mock Generic Switch Button (1)"
+    assert state_button_1.name == "Mock Generic Switch"
     # check event_types from featuremap 30 (0b11110) and MultiPressMax unset (default 2)
     assert state_button_1.attributes[ATTR_EVENT_TYPES] == [
         "initial_press",
         "short_release",
         "multi_press_ongoing",
         "multi_press_complete",
+        "multi_press_1",
+        "multi_press_2",
         "long_press",
         "long_release",
     ]
     # check button 2
-    state_button_2 = hass.states.get("event.mock_generic_switch_button_2")
+    state_button_2 = hass.states.get("event.mock_generic_switch_2")
     assert state_button_2
     assert state_button_2.state == "unknown"
-    # name should be 'DeviceName Button (2)'
-    assert state_button_2.name == "Mock Generic Switch Button (2)"
+    assert state_button_2.name == "Mock Generic Switch"
     # check event_types from featuremap 30 (0b11110) and MultiPressMax 4
     assert state_button_2.attributes[ATTR_EVENT_TYPES] == [
         "initial_press",
         "short_release",
         "multi_press_ongoing",
         "multi_press_complete",
+        "multi_press_1",
+        "multi_press_2",
+        "multi_press_3",
+        "multi_press_4",
         "long_press",
         "long_release",
     ]
 
+    supported_event_types = state_button_1.attributes[ATTR_EVENT_TYPES]
     for presses, expected in MULTI_PRESS_COUNT_TO_NAME.items():
         # trigger firing a multi press complete event
         await trigger_subscription_callback(
@@ -121,11 +128,42 @@ async def test_generic_switch_multi_node(
                 data={"totalNumberOfPressesCounted": presses},
             ),
         )
-        state = hass.states.get("event.mock_generic_switch_button_1")
-        assert state.attributes[ATTR_EVENT_TYPE] == "multi_press_complete"
+        state = hass.states.get("event.mock_generic_switch")
         assert state.attributes["event_type_extra"] == expected
+        # when the legacy event is supported, it fires after multi_press_complete
+        if f"multi_press_{presses}" in supported_event_types:
+            assert state.attributes[ATTR_EVENT_TYPE] == f"multi_press_{presses}"
+        else:
+            assert state.attributes[ATTR_EVENT_TYPE] == "multi_press_complete"
 
-    # trigger firing a multi press event
+    # verify both multi_press_complete and the legacy event fire for a supported press count
+    state_changes = async_capture_events(hass, EVENT_STATE_CHANGED)
+    await trigger_subscription_callback(
+        hass,
+        matter_client,
+        EventType.NODE_EVENT,
+        MatterNodeEvent(
+            node_id=matter_node.node_id,
+            endpoint_id=1,
+            cluster_id=Switch.id,
+            event_id=Switch.Events.MultiPressComplete.event_id,  # pyright: ignore[reportArgumentType]
+            event_number=0,
+            priority=1,
+            timestamp=0,
+            timestamp_type=0,
+            data={"totalNumberOfPressesCounted": 1},
+        ),
+    )
+    button_changes = [
+        e
+        for e in state_changes
+        if e.data["entity_id"] == "event.mock_generic_switch"
+    ]
+    assert len(button_changes) == 2
+    assert button_changes[0].data["new_state"].attributes[ATTR_EVENT_TYPE] == "multi_press_complete"
+    assert button_changes[1].data["new_state"].attributes[ATTR_EVENT_TYPE] == "multi_press_1"
+
+    # trigger firing a multi press ongoing event
     await trigger_subscription_callback(
         hass,
         matter_client,
@@ -142,5 +180,5 @@ async def test_generic_switch_multi_node(
             data={"totalNumberOfPressesCounted": 3},
         ),
     )
-    state = hass.states.get("event.mock_generic_switch_button_1")
+    state = hass.states.get("event.mock_generic_switch")
     assert state.attributes[ATTR_EVENT_TYPE] == "multi_press_ongoing"
